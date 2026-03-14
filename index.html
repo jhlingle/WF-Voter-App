@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WF Voter App</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #f0f4f8; color: #1a1a2e; }
+  header {
+    background: #003087; color: white; padding: 12px 16px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  header h1 { font-size: 1.1rem; }
+  #search-bar {
+    background: white; padding: 10px 12px;
+    border-bottom: 2px solid #003087;
+    display: flex; gap: 8px;
+  }
+  #search-input {
+    flex: 1; padding: 8px 12px; border: 1px solid #ccc;
+    border-radius: 4px; font-size: 0.95rem;
+  }
+  #search-btn {
+    background: #003087; color: white; border: none;
+    padding: 8px 16px; border-radius: 4px; cursor: pointer;
+    font-size: 0.95rem;
+  }
+  #search-btn:hover { background: #0050c8; }
+  #clear-btn {
+    background: #888; color: white; border: none;
+    padding: 8px 12px; border-radius: 4px; cursor: pointer;
+    font-size: 0.95rem;
+  }
+  #map { height: 45vh; width: 100%; }
+  #results-panel {
+    background: white; padding: 10px 12px;
+    border-top: 2px solid #003087;
+    overflow-y: auto; max-height: 40vh;
+  }
+  #results-header {
+    display: flex; justify-content: space-between;
+    align-items: center; margin-bottom: 8px;
+  }
+  #results-count {
+    font-weight: bold; color: #003087; font-size: 0.95rem;
+  }
+  #status-msg { font-size: 0.85rem; color: #666; }
+  .voter-card {
+    border: 1px solid #d0d8e8; border-radius: 6px;
+    padding: 10px 12px; margin-bottom: 8px;
+    background: #f7f9ff;
+  }
+  .voter-name {
+    font-weight: bold; color: #003087; font-size: 1rem;
+  }
+  .voter-detail { font-size: 0.85rem; color: #444; margin-top: 4px; }
+  .voter-history { font-size: 0.8rem; color: #555; margin-top: 6px; }
+  .party-DEM { border-left: 4px solid #003087; }
+  .party-REP { border-left: 4px solid #cc0000; }
+  .party-UNA { border-left: 4px solid #888; }
+  .voted { color: #006600; font-weight: bold; }
+  .not-voted { color: #aaa; }
+  #loading {
+    text-align: center; padding: 20px;
+    color: #003087; font-size: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🗳️ WF Voter Canvassing App</h1>
+  <span id="load-status">Loading data...</span>
+</header>
+
+<div id="search-bar">
+  <input type="text" id="search-input" placeholder="Search by name or street address..."/>
+  <button id="search-btn">Search</button>
+  <button id="clear-btn">Clear</button>
+</div>
+
+<div id="map"></div>
+
+<div id="results-panel">
+  <div id="results-header">
+    <span id="results-count">No results yet</span>
+    <span id="status-msg">Draw a boundary on the map or use search</span>
+  </div>
+  <div id="loading">Loading voter data — please wait...</div>
+  <div id="voter-list"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script>
+// ── CONFIG ──────────────────────────────────────────────
+const FILE_ID = '1-9ZTiD9Nig8zYPmCQA0-xIRoCI-D47QJ';
+const CSV_URL = `https://drive.google.com/uc?export=download&id=${FILE_ID}`;
+
+// ── MAP SETUP ───────────────────────────────────────────
+const map = L.map('map').setView([35.9799, -78.5097], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+// Draw controls
+const drawnItems = new L.FeatureGroup().addTo(map);
+const drawControl = new L.Control.Draw({
+  draw: {
+    polygon: true, rectangle: true,
+    circle: false, marker: false,
+    polyline: false, circlemarker: false
+  },
+  edit: { featureGroup: drawnItems }
+});
+map.addControl(drawControl);
+
+// ── STATE ───────────────────────────────────────────────
+let allVoters = [];
+let currentBoundary = null;
+
+// ── LOAD DATA ───────────────────────────────────────────
+Papa.parse(CSV_URL, {
+  download: true,
+  header: true,
+  skipEmptyLines: true,
+  complete: function(results) {
+    allVoters = results.data;
+    document.getElementById('load-status').textContent =
+      `${allVoters.length.toLocaleString()} voters loaded`;
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('status-msg').textContent =
+      'Draw a boundary on the map or use search';
+  },
+  error: function(err) {
+    document.getElementById('loading').textContent =
+      '⚠️ Error loading data. Check Google Drive sharing settings.';
+    console.error(err);
+  }
+});
+
+// ── DRAW EVENT ──────────────────────────────────────────
+map.on(L.Draw.Event.CREATED, function(e) {
+  drawnItems.clearLayers();
+  drawnItems.addLayer(e.layer);
+  currentBoundary = e.layer;
+  filterByBoundary(e.layer);
+});
+
+function filterByBoundary(layer) {
+  const bounds = layer.getBounds ? layer.getBounds() : null;
+  const filtered = allVoters.filter(v => {
+    // Wake Forest addresses — filter by street match for now
+    // Full geocoding can be added in a future phase
+    return true; // placeholder — see note below
+  });
+  // For now show search prompt
+  document.getElementById('status-msg').textContent =
+    'Boundary drawn — geocoding coming in next update. Use search for now.';
+  document.getElementById('results-count').textContent =
+    'Use name/address search below';
+}
+
+// ── SEARCH ──────────────────────────────────────────────
+document.getElementById('search-btn').addEventListener('click', doSearch);
+document.getElementById('search-input').addEventListener('keyup', function(e) {
+  if (e.key === 'Enter') doSearch();
+});
+
+function doSearch() {
+  const query = document.getElementById('search-input').value.trim().toLowerCase();
+  if (!query) return;
+  const results = allVoters.filter(v => {
+    const name = `${v.first_name} ${v.last_name}`.toLowerCase();
+    const addr = (v.res_street_address || '').toLowerCase();
+    return name.includes(query) || addr.includes(query);
+  });
+  renderVoters(results, `${results.length.toLocaleString()} results for "${query}"`);
+}
+
+document.getElementById('clear-btn').addEventListener('click', function() {
+  document.getElementById('search-input').value = '';
+  document.getElementById('voter-list').innerHTML = '';
+  document.getElementById('results-count').textContent = 'No results yet';
+  document.getElementById('status-msg').textContent =
+    'Draw a boundary on the map or use search';
+  drawnItems.clearLayers();
+});
+
+// ── RENDER VOTERS ───────────────────────────────────────
+function renderVoters(voters, countMsg) {
+  document.getElementById('results-count').textContent = countMsg;
+  const list = document.getElementById('voter-list');
+
+  if (voters.length === 0) {
+    list.innerHTML = '<p style="color:#888;padding:10px">No voters found.</p>';
+    return;
+  }
+  if (voters.length > 200) {
+    list.innerHTML = `<p style="color:#003087;padding:10px">
+      Showing first 200 of ${voters.length.toLocaleString()} results. 
+      Refine your search for better results.</p>`;
+    voters = voters.slice(0, 200);
+  }
+
+  const electionCols = Object.keys(voters[0] || {}).filter(k =>
+    k.match(/^\d{4}_/)
+  );
+
+  list.innerHTML = voters.map(v => {
+    const party = v.party_cd || 'UNA';
+    const historyHTML = electionCols.map(col => {
+      const val = v[col];
+      const voted = val && val.trim() !== '';
+      return `<span class="${voted ? 'voted' : 'not-voted'}">
+        ${col.replace(/_/g,' ')}: ${voted ? '✓' : '–'}
+      </span>`;
+    }).join(' &nbsp;|&nbsp; ');
+
+    return `
+      <div class="voter-card party-${party}">
+        <div class="voter-name">${v.first_name} ${v.last_name}</div>
+        <div class="voter-detail">
+          📍 ${v.res_street_address}, ${v.res_city_desc} ${v.zip_code}<br>
+          🏛️ Party: <strong>${party}</strong> &nbsp;
+          🎂 Age: ${v.age_at_year_end || '?'} &nbsp;
+          ⚧ Gender: ${v.gender_code || '?'}
+        </div>
+        <div class="voter-history">${historyHTML}</div>
+      </div>`;
+  }).join('');
+}
+</script>
+</body>
+</html>
